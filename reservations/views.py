@@ -15,6 +15,7 @@ from .serializers import GuestSerializer, ReservationSerializer, GuestDocumentSe
 from .email_utils import send_reservation_confirmation_email, send_reservation_cancellation_email
 from hotel_core.models import Room # For room status updates
 from users.models import CustomUser # For checking user role in GuestDocumentViewSet
+from billing.services import generate_invoice_for_reservation # For invoice generation
 
 # Placeholder for role-based permissions - these would be defined in e.g. users/permissions.py
 class IsAdmin(permissions.BasePermission): # Example placeholder
@@ -304,9 +305,24 @@ class ReservationViewSet(viewsets.ModelViewSet):
             reservation.save(update_fields=['status'])
             room.save(update_fields=['status'])
 
-        # TODO: Trigger billing process here, considering any late fees.
-        serializer = self.get_serializer(reservation)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        # Trigger invoice generation
+        try:
+            invoice = generate_invoice_for_reservation(reservation)
+            # Optionally, include some invoice info in the response
+            response_data = self.get_serializer(reservation).data
+            response_data['invoice_id'] = invoice.id
+            response_data['invoice_number'] = invoice.invoice_number
+            return Response(response_data, status=status.HTTP_200_OK)
+        except Exception as e:
+            # Log the error e
+            print(f"Error generating invoice for reservation {reservation.id}: {e}")
+            # Return success for check-out but indicate invoice issue
+            return Response({
+                "status": "Reservation checked out successfully, but invoice generation failed.",
+                "reservation_data": self.get_serializer(reservation).data,
+                "invoice_error": str(e)
+            }, status=status.HTTP_207_MULTI_STATUS)
+
 
     # Custom action for Cancellation
     @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated]) # More granular: IsAdmin or IsFrontDesk or IsOwner

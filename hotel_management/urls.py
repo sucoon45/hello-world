@@ -33,6 +33,7 @@ urlpatterns = [
         path("users/", include("users.urls")),
         path("hotel/", include("hotel_core.urls")),
         path("bookings/", include("reservations.urls")),
+        path("billing/", include("billing.urls")), # New billing app URLs
 
         # JWT Token Authentication
         path('token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),

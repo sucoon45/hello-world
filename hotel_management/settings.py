@@ -42,6 +42,7 @@ INSTALLED_APPS = [
     "users.apps.UsersConfig",
     "hotel_core.apps.HotelCoreConfig",
     "reservations.apps.ReservationsConfig",
+    "billing.apps.BillingConfig", # New billing app
 
     # DRF
     "rest_framework",
