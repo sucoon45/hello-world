@@ -1,6 +1,7 @@
 from decimal import Decimal
 from django.db import models
 from django.utils.translation import gettext_lazy as _
+from users.models import CustomUser # For limit_choices_to
 
 class Amenity(models.Model):
     name = models.CharField(max_length=100, unique=True)
@@ -165,7 +166,12 @@ class RoomServiceRequest(models.Model):
         on_delete=models.SET_NULL,
         null=True, blank=True,
         related_name='assigned_service_tasks',
-        limit_choices_to={'role__in': ['ADMIN', 'FRONT_DESK', 'HOUSEKEEPING']}, # Example: Limit to staff roles
+        limit_choices_to={'role__in': [
+            CustomUser.Role.ADMIN,
+            CustomUser.Role.FRONT_DESK,
+            CustomUser.Role.HOUSEKEEPING,
+            CustomUser.Role.MAINTENANCE  # Add MAINTENANCE role
+        ]},
         help_text="Staff member assigned to this task"
     )
     completed_at = models.DateTimeField(null=True, blank=True)
@@ -188,3 +194,92 @@ class RoomServiceRequest(models.Model):
         # elif self.status != self.RequestStatus.COMPLETED and self.completed_at:
         #     self.completed_at = None
         super().save(*args, **kwargs)
+
+
+class CleaningAssignment(models.Model):
+    class AssignmentStatus(models.TextChoices):
+        PENDING = 'PENDING', _('Pending')
+        IN_PROGRESS = 'IN_PROGRESS', _('In Progress')
+        COMPLETED = 'COMPLETED', _('Completed')
+        CANCELLED = 'CANCELLED', _('Cancelled') # e.g. room re-occupied, or issue resolved otherwise
+
+    room = models.ForeignKey(Room, on_delete=models.CASCADE, related_name='cleaning_assignments')
+    assigned_to = models.ForeignKey(
+        'users.CustomUser',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='cleaning_tasks',
+        limit_choices_to={'role': CustomUser.Role.HOUSEKEEPING} # Only assign to Housekeeping staff
+    )
+    assigned_at = models.DateTimeField(auto_now_add=True)
+    status = models.CharField(
+        max_length=20,
+        choices=AssignmentStatus.choices,
+        default=AssignmentStatus.PENDING
+    )
+    notes = models.TextField(blank=True, null=True, help_text="Notes from supervisor or staff.")
+    cleaned_at = models.DateTimeField(null=True, blank=True, help_text="Timestamp when cleaning was completed.")
+
+    class Meta:
+        verbose_name = "Cleaning Assignment"
+        verbose_name_plural = "Cleaning Assignments"
+        ordering = ['-assigned_at']
+
+    def __str__(self):
+        assignee_name = self.assigned_to.username if self.assigned_to else "Unassigned"
+        return f"Cleaning for Room {self.room.room_number} - {self.get_status_display()} (Assigned to: {assignee_name})"
+
+    def save(self, *args, **kwargs):
+        # If status is COMPLETED and cleaned_at is not set, set it now.
+        if self.status == self.AssignmentStatus.COMPLETED and not self.cleaned_at:
+            from django.utils import timezone # Local import
+            self.cleaned_at = timezone.now()
+
+        # If status is changed from COMPLETED to something else, clear cleaned_at (optional behavior)
+        # elif self.status != self.AssignmentStatus.COMPLETED and self.cleaned_at:
+        #     self.cleaned_at = None
+        super().save(*args, **kwargs)
+
+
+# --- Laundry and Linen Management Models (Basic Structure) ---
+
+class LinenType(models.Model):
+    name = models.CharField(max_length=100, unique=True, help_text="e.g., 'Bath Towel', 'Hand Towel', 'King Sheet Set', 'Pillowcase'")
+    description = models.TextField(blank=True, null=True)
+    # Potentially add fields like 'standard_lifespan_days' or 'cost_per_item' for advanced inventory.
+
+    def __str__(self):
+        return self.name
+
+    class Meta:
+        verbose_name = "Linen Type"
+        verbose_name_plural = "Linen Types"
+        ordering = ['name']
+
+
+class RoomLinenInventory(models.Model):
+    room = models.ForeignKey(Room, on_delete=models.CASCADE, related_name='linen_inventory')
+    linen_type = models.ForeignKey(LinenType, on_delete=models.PROTECT, related_name='room_stocks') # Protect LinenType from deletion if in use
+
+    quantity_par = models.PositiveIntegerField(default=0, help_text="Standard stock quantity (par level) for this linen type in this room.")
+    current_quantity_clean = models.PositiveIntegerField(default=0, help_text="Current count of clean items of this linen type in the room.")
+    # last_changed_date could track when linen was last fully replaced or par level was met.
+    last_restocked_date = models.DateField(null=True, blank=True, help_text="Date when this linen item was last restocked to par in the room.")
+    # last_sent_to_laundry_date = models.DateField(null=True, blank=True) # More complex tracking
+
+    class Meta:
+        verbose_name = "Room Linen Inventory"
+        verbose_name_plural = "Room Linen Inventories"
+        unique_together = ('room', 'linen_type') # Each linen type should have one entry per room
+        ordering = ['room__room_number', 'linen_type__name']
+
+    def __str__(self):
+        return f"{self.linen_type.name} in Room {self.room.room_number} (Clean: {self.current_quantity_clean}/{self.quantity_par})"
+
+    def needs_restock(self):
+        return self.current_quantity_clean < self.quantity_par
+
+    # Future methods could include:
+    # - mark_as_sent_to_laundry(quantity)
+    # - mark_as_returned_from_laundry(quantity)
+    # - restock_to_par()

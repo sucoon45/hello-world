@@ -1,12 +1,16 @@
+from django.db import models # For Q objects
 from rest_framework import viewsets, permissions
-from .models import RoomType, Amenity, Room, SeasonalPricing, RoomServiceRequest # Added RoomServiceRequest
+from .models import (
+    RoomType, Amenity, Room, SeasonalPricing,
+    RoomServiceRequest, CleaningAssignment # Added CleaningAssignment
+)
 from .serializers import (
     RoomTypeSerializer, AmenitySerializer, RoomSerializer,
-    SeasonalPricingSerializer, RoomServiceRequestSerializer # Added RoomServiceRequestSerializer
+    SeasonalPricingSerializer, RoomServiceRequestSerializer, CleaningAssignmentSerializer # Added CleaningAssignmentSerializer
 )
 from .permissions import CanManageSpecificRoomFields, IsAdminOrReadOnlyForRoomManagement
-# from django_filters.rest_framework import DjangoFilterBackend
-# from rest_framework import filters
+from django_filters.rest_framework import DjangoFilterBackend
+from rest_framework import filters
 from users.models import CustomUser # For permission checks
 from reservations.models import Reservation # For RoomServiceRequest logic
 
@@ -50,15 +54,19 @@ class RoomViewSet(viewsets.ModelViewSet):
     # For now, assuming they can update any non-read-only field on Room if they have PATCH permission.
     # The `status` field is not in RoomSerializer's read_only_fields, so it's writable.
 
-    # Example: Add filtering capabilities
-    # filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    # filterset_fields = ['room_type__id', 'status', 'floor', 'amenities__id'] # Use __id for foreign keys if filtering by ID
-    # search_fields = ['room_number', 'room_type__name']
-    # ordering_fields = ['price_per_night', 'room_number']
-    # ordering = ['room_number'] # Default ordering
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = {
+        'room_type__id': ['exact'],
+        'status': ['exact', 'in'], # Enable filtering by status (exact match or list of statuses)
+        'floor': ['exact', 'gte', 'lte'],
+        'amenities__id': ['exact'] # Filter by rooms having a specific amenity
+    }
+    search_fields = ['room_number', 'room_type__name']
+    ordering_fields = ['price_per_night', 'room_number', 'floor']
+    ordering = ['room_number'] # Default ordering
 
     # To enable filtering, you would:
-    # 1. pip install django-filter
+    # 1. pip install django-filter (already done)
     # 2. Add 'django_filters' to INSTALLED_APPS in settings.py
     # 3. Uncomment the import for DjangoFilterBackend and filters
     # 4. Uncomment and configure the filter_backends, filterset_fields, etc.
@@ -107,8 +115,17 @@ class RoomServiceRequestViewSet(viewsets.ModelViewSet):
             return [permissions.IsAuthenticated()]
 
         if view.action in ['update', 'partial_update', 'destroy']:
-            # Only staff can modify/delete. Specific roles might be for specific fields.
-            if user.role in [CustomUser.Role.ADMIN, CustomUser.Role.FRONT_DESK, CustomUser.Role.HOUSEKEEPING]: # Housekeeping might update status/assignment
+            # Admin/FrontDesk can manage all.
+            # Housekeeping can update status/assignment for non-maintenance.
+            # Maintenance can update status/assignment for maintenance issues.
+            if user.role == CustomUser.Role.ADMIN or user.role == CustomUser.Role.FRONT_DESK:
+                return [permissions.IsAuthenticated()]
+            if user.role == CustomUser.Role.HOUSEKEEPING:
+                 # Allow update if not a maintenance issue or if they are assigned
+                 # This needs object-level permission or check in perform_update for non-maintenance.
+                return [permissions.IsAuthenticated()]
+            if user.role == CustomUser.Role.MAINTENANCE:
+                # Allow update only for MAINTENANCE_ISSUE types, ideally checked at object level.
                 return [permissions.IsAuthenticated()]
 
         return [permissions.IsAdminUser()] # Default to Admin for safety
@@ -120,17 +137,82 @@ class RoomServiceRequestViewSet(viewsets.ModelViewSet):
         if not user.is_authenticated:
             return queryset.none()
 
-        if user.role in [CustomUser.Role.ADMIN, CustomUser.Role.FRONT_DESK, CustomUser.Role.HOUSEKEEPING]:
-            return queryset # Staff can see all
+        if user.role in [CustomUser.Role.ADMIN, CustomUser.Role.FRONT_DESK]:
+            return queryset # Admin/FrontDesk can see all
+
+        if user.role == CustomUser.Role.HOUSEKEEPING:
+            # Housekeeping sees non-maintenance requests, or maintenance requests they are assigned to (unlikely).
+            return queryset.filter(
+                models.Q(request_type__in=[
+                    RoomServiceRequest.RequestType.FOOD_BEVERAGE,
+                    RoomServiceRequest.RequestType.TOILETRIES,
+                    RoomServiceRequest.RequestType.OTHER
+                ]) | models.Q(assigned_to=user)
+            )
+
+        if user.role == CustomUser.Role.MAINTENANCE:
+            # Maintenance staff see only MAINTENANCE_ISSUE requests, ideally assigned to them or unassigned.
+            return queryset.filter(
+                models.Q(request_type=RoomServiceRequest.RequestType.MAINTENANCE_ISSUE) &
+                (models.Q(assigned_to=user) | models.Q(assigned_to__isnull=True))
+            )
 
         # If guest portal: filter by reservations linked to the guest's user account
-        # This requires CustomUser to be linked to Guest, and Guest to Reservation.
         if hasattr(user, 'guest_profile') and user.guest_profile:
-            return queryset.filter(reservation__guest=user.guest_profile)
-        elif user.is_authenticated: # Authenticated non-staff, non-guest_profile user (e.g. other staff roles not listed)
+            return queryset.filter(reservation__guest=user.guest_profile, requested_by=user) # Guest sees requests they made for their reservations
+        elif user.is_authenticated: # Authenticated non-staff, non-guest_profile user
             return queryset.filter(requested_by=user) # Can see requests they made
 
         return queryset.none()
+
+
+    def perform_update(self, serializer):
+        instance = serializer.instance
+        original_status = instance.status
+        new_status = serializer.validated_data.get('status', original_status)
+        user = self.request.user
+
+        # Permission checks for specific roles if not Admin/FrontDesk
+        if user.role == CustomUser.Role.HOUSEKEEPING:
+            if instance.request_type == RoomServiceRequest.RequestType.MAINTENANCE_ISSUE and instance.assigned_to != user:
+                raise permissions.PermissionDenied("Housekeeping cannot update maintenance issues not assigned to them.")
+            # Further checks can be added for which fields HK can update.
+
+        if user.role == CustomUser.Role.MAINTENANCE:
+            if instance.request_type != RoomServiceRequest.RequestType.MAINTENANCE_ISSUE:
+                raise permissions.PermissionDenied("Maintenance staff can only update maintenance issues.")
+            if instance.assigned_to != user and instance.assigned_to is not None: # Can take unassigned ones
+                raise permissions.PermissionDenied("You can only update maintenance issues assigned to you or unassigned ones.")
+
+        updated_instance = serializer.save()
+
+        # Room status integration for MAINTENANCE_ISSUE
+        if updated_instance.request_type == RoomServiceRequest.RequestType.MAINTENANCE_ISSUE:
+            room = updated_instance.room
+            if new_status == RoomServiceRequest.RequestStatus.IN_PROGRESS and \
+               original_status != RoomServiceRequest.RequestStatus.IN_PROGRESS:
+                # If a critical maintenance issue starts, room might go UNDER_MAINTENANCE
+                # This depends on severity, which is not a field yet. For now, assume all IN_PROGRESS maintenance makes room U/M.
+                if room.status != Room.RoomStatus.UNDER_MAINTENANCE:
+                    room.status = Room.RoomStatus.UNDER_MAINTENANCE
+                    room.save(update_fields=['status'])
+
+            elif new_status == RoomServiceRequest.RequestStatus.COMPLETED and \
+                 original_status != RoomServiceRequest.RequestStatus.COMPLETED:
+                # If maintenance is completed, room might become AVAILABLE or NEEDS_CLEANING
+                # This needs careful thought: does completing maintenance mean it's clean?
+                # For now, assume it becomes AVAILABLE. A more robust system might set it to NEEDS_CLEANING first.
+                if room.status == Room.RoomStatus.UNDER_MAINTENANCE: # Only change if it was U/M due to this
+                    room.status = Room.RoomStatus.AVAILABLE
+                    room.save(update_fields=['status'])
+
+            elif new_status == RoomServiceRequest.RequestStatus.CANCELLED and \
+                 original_status == RoomServiceRequest.RequestStatus.IN_PROGRESS and \
+                 room.status == Room.RoomStatus.UNDER_MAINTENANCE:
+                # If an IN_PROGRESS maintenance (that set room to U/M) is cancelled, room might revert.
+                # This also needs care: was it U/M *only* due to this ticket?
+                room.status = Room.RoomStatus.AVAILABLE # Or previous status if known
+                room.save(update_fields=['status'])
 
 
     def perform_create(self, serializer):
@@ -166,3 +248,75 @@ class RoomServiceRequestViewSet(viewsets.ModelViewSet):
 
 
         serializer.save(requested_by=self.request.user)
+
+
+class CleaningAssignmentViewSet(viewsets.ModelViewSet):
+    queryset = CleaningAssignment.objects.all().select_related('room', 'assigned_to')
+    serializer_class = CleaningAssignmentSerializer
+    # filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    # filterset_fields = ['room__id', 'assigned_to__id', 'status']
+    # search_fields = ['room__room_number', 'notes']
+
+    def get_permissions(self):
+        user = self.request.user
+        if not user or not user.is_authenticated:
+            return [permissions.IsAuthenticated()]
+
+        if user.role == CustomUser.Role.ADMIN:
+            return [permissions.IsAdminUser()]
+
+        if user.role == CustomUser.Role.FRONT_DESK: # Front desk might view, or create for unassigned
+            if self.action in ['list', 'retrieve', 'create']:
+                return [permissions.IsAuthenticated()]
+
+        if user.role == CustomUser.Role.HOUSEKEEPING:
+            if self.action in ['list', 'retrieve']: # HK staff can see all or their own (filtered by queryset)
+                return [permissions.IsAuthenticated()]
+            if self.action in ['partial_update', 'update']: # HK staff can update their assignments
+                return [permissions.IsAuthenticated()] # Further check in perform_update for ownership
+            # HK staff should not create/delete assignments directly, only supervisors/admin.
+
+        return [permissions.IsAdminUser()] # Default deny or admin only
+
+    def get_queryset(self):
+        user = self.request.user
+        queryset = super().get_queryset()
+
+        if not user.is_authenticated:
+            return queryset.none()
+
+        if user.role in [CustomUser.Role.ADMIN, CustomUser.Role.FRONT_DESK]: # Admin/FrontDesk can see all.
+            return queryset
+
+        if user.role == CustomUser.Role.HOUSEKEEPING:
+            # Housekeeping staff see only assignments assigned to them, or unassigned PENDING ones.
+            return queryset.filter(
+                models.Q(assigned_to=user) | models.Q(assigned_to__isnull=True, status=CleaningAssignment.AssignmentStatus.PENDING)
+            )
+
+        return queryset.none() # Other roles (e.g. Guest) see nothing
+
+    def perform_update(self, serializer):
+        user = self.request.user
+        instance = serializer.instance
+
+        # Housekeeping staff can only update status of their own assignments or claim unassigned PENDING ones.
+        if user.role == CustomUser.Role.HOUSEKEEPING:
+            if instance.assigned_to != user and instance.assigned_to is not None:
+                raise permissions.PermissionDenied("You can only update your own cleaning assignments.")
+
+            # Check if only allowed fields are being updated by HK staff (e.g., status, notes)
+            allowed_hk_update_fields = {'status', 'notes'}
+            for field in serializer.validated_data.keys():
+                if field not in allowed_hk_update_fields:
+                    raise permissions.PermissionDenied(f"Housekeeping staff cannot update field: {field}")
+
+        # The signal handler auto_update_room_status_on_cleaning_completion will handle room status.
+        serializer.save()
+
+    def perform_create(self, serializer):
+        # Admin or FrontDesk (acting as supervisor) can create and assign.
+        # If created by HK staff (not allowed by default permissions above, but if it were),
+        # it should not allow setting 'assigned_to' to someone else.
+        # For now, only Admin/FrontDesk are expected here via permissions.
+        serializer.save()

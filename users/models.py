@@ -7,6 +7,7 @@ class CustomUser(AbstractUser):
         ADMIN = "ADMIN", _("Admin")
         FRONT_DESK = "FRONT_DESK", _("Front Desk")
         HOUSEKEEPING = "HOUSEKEEPING", _("Housekeeping")
+        MAINTENANCE = "MAINTENANCE", _("Maintenance") # New role
         ACCOUNTING = "ACCOUNTING", _("Accounting")
         GUEST = "GUEST", _("Guest")
 

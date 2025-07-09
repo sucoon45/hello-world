@@ -227,3 +227,151 @@ class HotelCoreAPITests(APITestCase):
 # and ensure CustomUser and Reservation models are correctly imported and set up.
 # For room-detail, if RoomViewSet basename is 'room', then reverse('room-detail', ...) is correct.
 # For roomservicerequest-list and -detail, if basename is 'roomservicerequest', it's correct.
+
+    # --- Phase 5: Housekeeping Management Tests ---
+
+    # 1. Room Cleaning Schedule (API Access)
+    def test_list_rooms_needing_cleaning(self):
+        self.client.force_authenticate(user=self.housekeeping_user)
+        # Ensure one room is NEEDS_CLEANING
+        self.room_avail.status = Room.RoomStatus.NEEDS_CLEANING
+        self.room_avail.save()
+        # self.room_booked is BOOKED
+        # self.room_maint is UNDER_MAINTENANCE
+
+        url = reverse('room-list') # Assuming RoomViewSet is registered with basename 'room'
+        response = self.client.get(f"{url}?status={Room.RoomStatus.NEEDS_CLEANING}")
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertEqual(len(response.data['results']), 1)
+        self.assertEqual(response.data['results'][0]['id'], self.room_avail.id)
+        self.assertEqual(response.data['results'][0]['status'], Room.RoomStatus.NEEDS_CLEANING)
+
+    # 2. Cleaning Assignments
+    def test_create_cleaning_assignment_by_admin(self):
+        self.client.force_authenticate(user=self.admin_user)
+        self.room_avail.status = Room.RoomStatus.NEEDS_CLEANING # Room must need cleaning for assignment
+        self.room_avail.save()
+
+        url = reverse('cleaningassignment-list') # Basename 'cleaningassignment'
+        data = {
+            "room_id": self.room_avail.pk,
+            "assigned_to_id": self.housekeeping_user.pk,
+            "notes": "Guest requested quick turnaround."
+        }
+        response = self.client.post(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        self.assertEqual(CleaningAssignment.objects.count(), 1)
+        assignment = CleaningAssignment.objects.first()
+        self.assertEqual(assignment.room, self.room_avail)
+        self.assertEqual(assignment.assigned_to, self.housekeeping_user)
+        self.assertEqual(assignment.status, CleaningAssignment.AssignmentStatus.PENDING)
+
+    def test_housekeeping_staff_update_own_assignment_status(self):
+        self.client.force_authenticate(user=self.housekeeping_user)
+        assignment = CleaningAssignment.objects.create(
+            room=self.room_avail,
+            assigned_to=self.housekeeping_user,
+            status=CleaningAssignment.AssignmentStatus.PENDING
+        )
+        self.room_avail.status = Room.RoomStatus.NEEDS_CLEANING # Prerequisite for the signal later
+        self.room_avail.save()
+
+        url = reverse('cleaningassignment-detail', kwargs={'pk': assignment.pk})
+
+        # HK staff updates to IN_PROGRESS
+        response_inprogress = self.client.patch(url, {"status": CleaningAssignment.AssignmentStatus.IN_PROGRESS}, format='json')
+        self.assertEqual(response_inprogress.status_code, status.HTTP_200_OK, response_inprogress.data)
+        assignment.refresh_from_db()
+        self.assertEqual(assignment.status, CleaningAssignment.AssignmentStatus.IN_PROGRESS)
+
+        # HK staff updates to COMPLETED
+        response_completed = self.client.patch(url, {"status": CleaningAssignment.AssignmentStatus.COMPLETED}, format='json')
+        self.assertEqual(response_completed.status_code, status.HTTP_200_OK, response_completed.data)
+        assignment.refresh_from_db()
+        self.assertEqual(assignment.status, CleaningAssignment.AssignmentStatus.COMPLETED)
+        self.assertIsNotNone(assignment.cleaned_at)
+
+        # Check if room status was updated to AVAILABLE by the signal
+        self.room_avail.refresh_from_db()
+        self.assertEqual(self.room_avail.status, Room.RoomStatus.AVAILABLE)
+
+    def test_signal_auto_creates_cleaning_assignment(self):
+        # Initial state: room is AVAILABLE, no cleaning assignments
+        self.room_booked.status = Room.RoomStatus.AVAILABLE
+        self.room_booked.save()
+        self.assertEqual(CleaningAssignment.objects.filter(room=self.room_booked).count(), 0)
+
+        # Change room status to NEEDS_CLEANING - signal should fire
+        self.room_booked.status = Room.RoomStatus.NEEDS_CLEANING
+        self.room_booked.save()
+
+        self.assertEqual(CleaningAssignment.objects.filter(room=self.room_booked).count(), 1)
+        assignment = CleaningAssignment.objects.get(room=self.room_booked)
+        self.assertEqual(assignment.status, CleaningAssignment.AssignmentStatus.PENDING)
+        self.assertIsNone(assignment.assigned_to) # Initially unassigned
+
+    # 3. Maintenance Ticketing System (Leveraging RoomServiceRequest)
+    def test_create_maintenance_request_and_assign_to_maintenance_staff(self):
+        self.client.force_authenticate(user=self.admin_user) # Admin creates and assigns
+        maintenance_staff = CustomUser.objects.create_user(
+            username='maint_staff', email='maint@example.com', password='password123',
+            role=CustomUser.Role.MAINTENANCE
+        )
+        url = reverse('roomservicerequest-list')
+        data = {
+            "room_id": self.room_avail.pk,
+            "request_type": RoomServiceRequest.RequestType.MAINTENANCE_ISSUE,
+            "description": "Shower head broken.",
+            "assigned_to_id": maintenance_staff.pk # Assign directly
+        }
+        response = self.client.post(url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED, response.data)
+        rsr = RoomServiceRequest.objects.get(pk=response.data['id'])
+        self.assertEqual(rsr.request_type, RoomServiceRequest.RequestType.MAINTENANCE_ISSUE)
+        self.assertEqual(rsr.assigned_to, maintenance_staff)
+
+    def test_maintenance_staff_updates_own_ticket_and_room_status_changes(self):
+        maintenance_staff = CustomUser.objects.create_user(
+            username='maint_staff2', email='maint2@example.com', password='password123',
+            role=CustomUser.Role.MAINTENANCE
+        )
+        self.client.force_authenticate(user=maintenance_staff)
+
+        # Admin creates the ticket first
+        admin_client = APITestCase() # New client for admin actions
+        admin_client.force_authenticate(user=self.admin_user)
+        rsr_data = {
+            "room_id": self.room_avail.pk,
+            "request_type": RoomServiceRequest.RequestType.MAINTENANCE_ISSUE,
+            "description": "AC not cooling",
+            "assigned_to_id": maintenance_staff.pk
+        }
+        rsr_create_url = reverse('roomservicerequest-list')
+        admin_client.post(rsr_create_url, rsr_data, format='json')
+        rsr = RoomServiceRequest.objects.get(description="AC not cooling")
+
+        self.room_avail.status = Room.RoomStatus.AVAILABLE # Ensure room is available initially
+        self.room_avail.save()
+
+        url = reverse('roomservicerequest-detail', kwargs={'pk': rsr.pk})
+
+        # Maintenance staff sets to IN_PROGRESS
+        response_inprogress = self.client.patch(url, {"status": RoomServiceRequest.RequestStatus.IN_PROGRESS}, format='json')
+        self.assertEqual(response_inprogress.status_code, status.HTTP_200_OK, response_inprogress.data)
+        rsr.refresh_from_db()
+        self.assertEqual(rsr.status, RoomServiceRequest.RequestStatus.IN_PROGRESS)
+        # Check room status changed to UNDER_MAINTENANCE
+        self.room_avail.refresh_from_db()
+        self.assertEqual(self.room_avail.status, Room.RoomStatus.UNDER_MAINTENANCE)
+
+        # Maintenance staff sets to COMPLETED
+        response_completed = self.client.patch(url, {"status": RoomServiceRequest.RequestStatus.COMPLETED}, format='json')
+        self.assertEqual(response_completed.status_code, status.HTTP_200_OK, response_completed.data)
+        rsr.refresh_from_db()
+        self.assertEqual(rsr.status, RoomServiceRequest.RequestStatus.COMPLETED)
+        # Check room status changed back to AVAILABLE
+        self.room_avail.refresh_from_db()
+        self.assertEqual(self.room_avail.status, Room.RoomStatus.AVAILABLE)
+
+    # Linen management models are structure-only for now, no API tests.

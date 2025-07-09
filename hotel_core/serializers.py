@@ -1,5 +1,9 @@
 from rest_framework import serializers
-from .models import RoomType, Amenity, Room, SeasonalPricing, RoomServiceRequest # Added RoomServiceRequest
+from .models import (
+    RoomType, Amenity, Room, SeasonalPricing,
+    RoomServiceRequest, CleaningAssignment # Added CleaningAssignment
+)
+from users.models import CustomUser # For assigned_to_id queryset
 
 class AmenitySerializer(serializers.ModelSerializer):
     class Meta:
@@ -104,6 +108,44 @@ class SeasonalPricingSerializer(serializers.ModelSerializer):
         # overlaps with an existing rule.
 
         return data
+
+
+class CleaningAssignmentSerializer(serializers.ModelSerializer):
+    room_number = serializers.StringRelatedField(source='room.room_number', read_only=True)
+    assigned_to_username = serializers.StringRelatedField(source='assigned_to.username', read_only=True)
+
+    # Writable fields for creation/update by authorized staff
+    room_id = serializers.PrimaryKeyRelatedField(
+        queryset=Room.objects.all(), source='room', write_only=True, required=True # Room is required
+    )
+    assigned_to_id = serializers.PrimaryKeyRelatedField(
+        queryset=CustomUser.objects.filter(role=CustomUser.Role.HOUSEKEEPING), # Ensure only HK staff can be assigned
+        source='assigned_to',
+        write_only=True,
+        required=False, # Can be unassigned initially
+        allow_null=True
+    )
+
+    class Meta:
+        model = CleaningAssignment
+        fields = (
+            'id', 'room', 'room_id', 'room_number',
+            'assigned_to', 'assigned_to_id', 'assigned_to_username',
+            'assigned_at', 'status', 'notes', 'cleaned_at'
+        )
+        read_only_fields = ('room', 'assigned_to', 'assigned_at', 'cleaned_at')
+        # `status` and `notes` can be updated by authorized staff.
+        # `assigned_to_id` allows changing assignment.
+
+    def validate_room_id(self, value): # value here is the Room instance
+        # When creating an assignment, room should ideally be in NEEDS_CLEANING status.
+        # This validation might be too strict if assignments can be pre-scheduled.
+        # For updates, room status might change.
+        # if self.instance is None and value.status != Room.RoomStatus.NEEDS_CLEANING:
+        #     raise serializers.ValidationError(
+        #         f"Cannot create cleaning assignment for Room {value.room_number} as it is not in 'Needs Cleaning' status."
+        #     )
+        return value
 
 
 class RoomServiceRequestSerializer(serializers.ModelSerializer):
