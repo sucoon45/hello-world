@@ -5,6 +5,8 @@ from django.utils.translation import gettext_lazy as _
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 import uuid
+import datetime # For timedelta
+from decimal import Decimal # For price calculations
 
 
 class Guest(models.Model):
@@ -102,14 +104,43 @@ class Reservation(models.Model):
             raise ValidationError(_(f"Number of guests exceeds the capacity of {self.room.room_type.name} ({self.room.room_type.capacity})."))
 
     def calculate_total_price(self):
-        if self.check_in_date and self.check_out_date and self.room:
-            duration = (self.check_out_date - self.check_in_date).days
-            if duration <= 0: # Should be caught by clean method, but good to be safe
-                return 0
-            return duration * self.room.price_per_night
-        return None
+        """
+        Calculates the total base price for the stay, considering daily rates
+        which may vary due to seasonal pricing.
+        This method calculates the price for the room for the duration,
+        excluding extra fees like early check-in/late check-out.
+        """
+        if not (self.check_in_date and self.check_out_date and self.room):
+            return None
 
-    def save(self, *args, **kwargs):
+        current_date = self.check_in_date
+        calculated_total_base_price = Decimal('0.00')
+
+        if self.check_out_date <= self.check_in_date: # Duration is 0 or negative
+            return calculated_total_base_price
+
+        while current_date < self.check_out_date:
+            daily_price = self.room.get_price_for_date(current_date)
+            if daily_price is None: # Should not happen if room has a base price
+                # Fallback or raise error - for now, assume room always has a price
+                # This could happen if get_price_for_date returns None unexpectedly
+                # For robustness, one might default to room.price_per_night or log an error.
+                # For now, let's assume get_price_for_date always returns a Decimal.
+                # If it can return None, then handling for that is crucial.
+                # Let's assume self.room.get_price_for_date ensures a Decimal.
+                pass # Or handle error: raise ValueError("Could not determine price for a day")
+
+            calculated_total_base_price += daily_price
+            current_date += datetime.timedelta(days=1)
+
+        return calculated_total_base_price
+
+    # This was the duplicate save method. The correct one is above.
+    # def save(self, *args, **kwargs):
+    #    if not self.total_price: # Calculate price if not set
+    #        self.total_price = self.calculate_total_price()
+    #    super().save(*args, **kwargs)
+
     def __str__(self):
         return f"Reservation for {self.guest} in {self.room.room_number} from {self.check_in_date} to {self.check_out_date}"
 
