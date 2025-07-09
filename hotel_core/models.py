@@ -19,10 +19,11 @@ class RoomType(models.Model):
 class Room(models.Model):
     class RoomStatus(models.TextChoices):
         AVAILABLE = "AVAILABLE", _("Available")
+        BOOKED = "BOOKED", _("Booked") # New status
         OCCUPIED = "OCCUPIED", _("Occupied")
-        UNDER_MAINTENANCE = "UNDER_MAINTENANCE", _("Under Maintenance")
         NEEDS_CLEANING = "NEEDS_CLEANING", _("Needs Cleaning")
-        # Add other statuses as needed
+        UNDER_MAINTENANCE = "UNDER_MAINTENANCE", _("Under Maintenance")
+        # Add other statuses as needed, e.g., DECOMMISSIONED
 
     room_number = models.CharField(max_length=10, unique=True)
     room_type = models.ForeignKey(RoomType, on_delete=models.CASCADE, related_name="rooms")

@@ -47,6 +47,7 @@ INSTALLED_APPS = [
     "rest_framework",
     "rest_framework_simplejwt",
     "rest_framework_simplejwt.token_blacklist", # Optional: if you want to enable token blacklisting for logout
+    "django_filters", # For DRF filtering
 ]
 
 # Custom User Model
@@ -187,3 +188,18 @@ STATIC_URL = "static/"
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# Email Configuration (for development, prints to console)
+EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
+# For production, you'd use something like:
+# EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+# EMAIL_HOST = 'smtp.example.com'
+# EMAIL_PORT = 587
+# EMAIL_USE_TLS = True
+# EMAIL_HOST_USER = 'your-email@example.com'
+# EMAIL_HOST_PASSWORD = 'your-email-password'
+# DEFAULT_FROM_EMAIL = 'webmaster@localhost' # Or your desired default from email
+
+# Media files (uploads) configuration for development
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
