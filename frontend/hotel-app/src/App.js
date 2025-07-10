@@ -6,6 +6,8 @@ import MainLayout from './components/layout/MainLayout';
 import LoginPage from './pages/LoginPage';
 import DashboardPage from './pages/DashboardPage';
 import ReservationsListPage from './pages/ReservationsListPage';
+import ReservationDetailPage from './pages/ReservationDetailPage'; // Import new page
+import ReservationFormPage from './pages/ReservationFormPage';   // Import new page
 import NotFoundPage from './pages/NotFoundPage';
 import ProtectedRoute from './routes/ProtectedRoute';
 // import { useAuth } from './contexts/AuthContext'; // Currently not needed directly in App.js for this setup
@@ -30,6 +32,9 @@ function App() {
         <Route index element={<Navigate to="dashboard" replace />} />
         <Route path="dashboard" element={<DashboardPage />} />
         <Route path="reservations" element={<ReservationsListPage />} />
+         <Route path="reservations/new" element={<ReservationFormPage />} />
+         <Route path="reservations/:id" element={<ReservationDetailPage />} />
+         <Route path="reservations/:id/edit" element={<ReservationFormPage />} />
         {/* Add more protected routes here as children of MainLayout */}
       </Route>
 
